@@ -2,11 +2,9 @@ import aiosmtplib
 from email.message import EmailMessage
 import logging
 from dotenv import load_dotenv
-
-# Load the .env file
-load_dotenv()
-
-# Read secrets from environment
+import os
+ 
+load_dotenv() 
 SMTP_USER = os.getenv("SMTP_EMAIL")
 SMTP_PASS = os.getenv("SMTP_PASSWORD")
 
@@ -27,17 +25,7 @@ async def send_email(to_email: str, subject: str, body: str):
     message["To"] = to_email
     message["Subject"] = subject
     message.set_content(body)
-
-    # MOCK MODE: If no password, just print it (Safety for Dev)
-    if SMTP_PASSWORD == "your-password":
-        print(f"\n📨 [MOCK EMAIL SENT] ------------------")
-        print(f"To: {to_email}")
-        print(f"Subject: {subject}")
-        print(f"Body: {body}")
-        print(f"----------------------------------------\n")
-        return True
-
-    # REAL MODE: Send via SMTP
+ 
     try:
         await aiosmtplib.send(
             message,

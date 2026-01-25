@@ -1,9 +1,12 @@
 import os
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # ⚠️ REPLACE WITH YOUR PROJECT ID IF NEEDED
-TOPIC_NAME = "projects/quantum-theorem-447404-u7/topics/emails"
+TOPIC_NAME = os.getenv("TOPIC_NAME")
 
 def connect_gmail_to_pubsub():
     SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
