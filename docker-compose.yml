@@ -1,7 +1,6 @@
 version: '3.8'
 
-services:
-  # 🧠 The Database (Postgres + pgvector)
+services: 
   db:
     image: pgvector/pgvector:pg16
     container_name: agent_db
@@ -18,15 +17,13 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
-
-  # 📨 The Queue (Redis for Arq)
+ 
   redis:
     image: redis:alpine
     container_name: agent_redis
     ports:
       - "6379:6379"
-
-  # 🗄️ The File Store (MinIO for Email Attachments)
+ 
   minio:
     image: minio/minio
     container_name: agent_minio

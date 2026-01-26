@@ -1,99 +1,132 @@
 import os
-from typing import TypedDict, Optional
+import json
+from typing import TypedDict, Optional, Annotated
 from dotenv import load_dotenv
 
 # LangChain Imports
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import JsonOutputParser
+from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage
 from langgraph.graph import StateGraph, END
+from langgraph.prebuilt import ToolNode, tools_condition
+
+# Import our new tools
+from app.services.tools import ALL_TOOLS
 
 load_dotenv()
- 
+
+# 1. SETUP MODEL
+# 🔴 FIX 1: Use the STABLE model. '2.5' is causing the hallucinations.
 llm = ChatGoogleGenerativeAI(
     model="gemini-2.5-flash",
     google_api_key=os.getenv("GEMINI_API_KEY"),
-    temperature=0   
+    temperature=0
 )
- 
-class AgentState(TypedDict):
-    subject: str
-    body: str
-    analysis: Optional[dict]  
+llm_with_tools = llm.bind_tools(ALL_TOOLS)
 
- 
-def analyzer_node(state: AgentState):
+# 2. DEFINE STATE
+from langgraph.graph.message import add_messages
+class AgentState(TypedDict):
+    messages: Annotated[list, add_messages] 
+    final_analysis: Optional[dict] 
+
+# 3. DEFINE NODES
+
+def reasoner_node(state: AgentState):
     """
-    Takes the raw email and uses LLM to classify and draft a reply.
+    The Brain. Decides whether to call a tool or just answer.
     """
-    print("🤖 Agent Node: Analyzing Ticket...")
-     
+    # Create a COPY of messages so we can inject things without saving them to DB
+    messages = list(state["messages"])
+    
+    # 1. SYSTEM PROMPT
+    if not isinstance(messages[0], SystemMessage):
+        messages.insert(0, SystemMessage(content="""
+        You are the 'Ticket Resolution Engine'.
+        Your job is to query tools and REPORT FACTS.
+        You are NOT a conversationalist. You are a reporter.
+        """))
+
+    # 🔴 FIX 2: THE GHOST INSTRUCTION 👻
+    # If the last message was a Tool Output, we inject a "Voice of God" instruction
+    # that forces the AI to treat it as data, not chat.
+    if isinstance(messages[-1], ToolMessage):
+        messages.append(HumanMessage(content="""
+        [SYSTEM INSTRUCTION]
+        The data above is from the INTERNAL DATABASE, not the user.
+        
+        TASK:
+        1. Read the database log above.
+        2. Answer the user's original question using this data.
+        3. Do NOT thank the database.
+        4. Do NOT say "Thanks for the update."
+        5. Just state the facts.
+        """))
+
+    # Call the model
+    response = llm_with_tools.invoke(messages)
+    
+    return {"messages": [response]}
+
+def analysis_extractor_node(state: AgentState):
+    """
+    Final step: Take the conversation history and format it into JSON for our DB.
+    """
+    last_message = state["messages"][-1]
+    
+    structure_prompt = f"""
+    Analyze this conversation history and extract the final structured data as JSON.
+    Last message: {last_message.content}
+    
+    Output keys: category, sentiment, urgency, confidence, entities, rationale, error_message, suggested_reply
+    """
+    
+    from langchain_core.output_parsers import JsonOutputParser
     parser = JsonOutputParser()
-    
-    # Create the prompt
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", "You are an advanced Support AI. Analyze the email and output strictly valid JSON."),
-        ("user", """
-        Subject: {subject}
-        Body: {body}
-        
-        Format instructions:
-        {format_instructions}
-        
-        Extract:
-        1. category (Billing, Tech, Feature, Spam, Grievance, Report, Subscription)
-        2. sentiment (Positive, Neutral, Angry)
-        3. urgency (1-5)
-        4. confidence (0.0-1.0)
-        5. suggested_reply (Polite, helpful response)
-        """)
-    ])
-    
-    # Chain it: Prompt -> LLM -> JSON Parser
-    chain = prompt | llm | parser
+    chain = llm | parser
     
     try:
-        result = chain.invoke({
-            "subject": state["subject"], 
-            "body": state["body"],
-            "format_instructions": parser.get_format_instructions()
-        })
-        # Update the state with the result
-        return {"analysis": result}
+        result = chain.invoke(structure_prompt)
         
+        # Sanitizers
+        result["urgency"] = int(result.get("urgency", 1)) if str(result.get("urgency", "1")).isdigit() else 1
+        try: result["confidence"] = float(result.get("confidence", 0.0))
+        except: result["confidence"] = 0.0
+                 
+        return {"final_analysis": result}
+
     except Exception as e:
-        print(f"❌ LangChain Error: {e}")
-        # Fallback state on error
-        return {"analysis": {
+        return {"final_analysis": {
             "category": "Error", 
-            "sentiment": "Neutral", 
             "urgency": 1,
-            "suggested_reply": "We received your request and will review it manually."
+            "suggested_reply": last_message.content
         }}
 
 # 4. BUILD THE GRAPH
 workflow = StateGraph(AgentState)
 
-# Add nodes
-workflow.add_node("analyze", analyzer_node)
+workflow.add_node("agent", reasoner_node)
+workflow.add_node("tools", ToolNode(ALL_TOOLS))
+workflow.add_node("finalize", analysis_extractor_node)
 
-# Add edges (The flow logic)
-# Start -> Analyze -> End
-workflow.set_entry_point("analyze")
-workflow.add_edge("analyze", END)
+workflow.set_entry_point("agent")
 
-# Compile the graph into a runnable application
+workflow.add_conditional_edges(
+    "agent",
+    tools_condition, 
+    {"tools": "tools", "__end__": "finalize"}
+)
+
+workflow.add_edge("tools", "agent")
+workflow.add_edge("finalize", END)
+
 app = workflow.compile()
 
-# 5. PUBLIC API FUNCTION
+# 5. PUBLIC API
 def analyze_ticket(subject: str, body: str):
     """
-    The entry point called by main.py
+    Entry point. Now creates a conversation history.
     """
-    inputs = {"subject": subject, "body": body}
-    
-    # Run the graph
-    # We use invoke() to run it synchronously (or use ainvoke for async)
-    result_state = app.invoke(inputs)
-    
-    return result_state["analysis"]
+    initial_message = f"Subject: {subject}\nBody: {body}\n\nAnalyze this request. Use tools if you see Invoice IDs or need to check Subscriptions."
+    inputs = {"messages": [HumanMessage(content=initial_message)]}
+    result = app.invoke(inputs, config={"recursion_limit": 10})
+    return result.get("final_analysis", {})

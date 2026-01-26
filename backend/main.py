@@ -44,6 +44,7 @@ async def lifespan(app: FastAPI):
     with sync_engine.connect() as conn:
         conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
         conn.commit()
+    
      
     async with async_engine.begin() as conn:
         await conn.run_sync(SQLModel.metadata.create_all)
@@ -174,12 +175,17 @@ async def ingest_email(request: Request):
         sentiment=ai_result.get("sentiment", "Neutral"),
         urgency=ai_result.get("urgency", 1),
         confidence_score=ai_result.get("confidence", 0.0),
-        reasoning=json.dumps(ai_result) # Store the whole blob for debug
+        entities=ai_result.get("entities", {}), 
+        reasoning=ai_result.get("rationale"),  
+        error_message=ai_result.get("error_message")
     )
     session.add(classification)
     await session.commit()
 
-    print(f"✅ AI Result: {classification.category} | Urgency: {classification.urgency}")
+    print(f"✅ AI Decision: {classification.category}")
+    print(f"🤔 Rationale: {classification.reasoning}")
+    if classification.error_message:
+        print(f"⚠️ Error Detail: {classification.error_message}")
 
     # 6. SEND THE AI REPLY (Instead of the hardcoded one)
     reply_subject = f"Re: {email_data['subject']}"

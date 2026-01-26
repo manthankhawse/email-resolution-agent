@@ -83,6 +83,8 @@ class TicketClassification(SQLModel, table=True):
     sentiment: str = Field(default="neutral")      # e.g., "Angry", "Happy"
     urgency: int = Field(default=1)                # 1-5 scale
     confidence_score: float = Field(default=0.0)
-    
+    entities: Dict = Field(default_factory=dict, sa_column=Column(JSON))
+
+    error_message: Optional[str] = None    
     # Store raw AI reasoning (Why did it choose this category?)
     reasoning: Optional[str] = None
